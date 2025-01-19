@@ -136,7 +136,7 @@ class CompressedBG :
         height = self._stripe_height(index)
         row_start = index * self._stripe_h
         row_end = row_start + height
-        pixels = buffer[row_start:row_end, :, :].copy()
+        pixels = buffer[row_start:row_end, :].copy()
         
         # 1. RGB -> BGR
         match self._bpp :
@@ -147,12 +147,12 @@ class CompressedBG :
         # 2. create diff
         for y in reversed(range(1, height)) :
             for x in reversed(range(1, width)) :
-                pixels[y,x,:] -= ((
-                    pixels[y-1,x,:].astype(np.uint16) +
-                    pixels[y,x-1,:].astype(np.uint16)
+                pixels[y,x] -= ((
+                    pixels[y-1,x].astype(np.uint16) +
+                    pixels[y,x-1].astype(np.uint16)
                 ) >> 1).astype(np.uint8)
-        for y in reversed(range(1, height)) : pixels[y, 0, :] -= pixels[y-1, 0, :]
-        for x in reversed(range(1, width )) : pixels[0, x, :] -= pixels[0, x-1, :]
+        for y in reversed(range(1, height)) : pixels[y, 0] -= pixels[y-1, 0]
+        for x in reversed(range(1, width )) : pixels[0, x] -= pixels[0, x-1]
         
         # 3. compression 1 : compress to [n1, n1*\x00, n2, read(n2), ...]
         comp1 = BytesIO()
