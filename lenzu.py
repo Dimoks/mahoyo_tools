@@ -24,6 +24,7 @@ def read_huffman_table(src: BytesReader, bitCount: int) :
     # Indices are stored with weights only if it takes less bytes than
     # storing all weights including the zeros.
     if first_real_entry * 4 < (index_bits + 4) * entries_to_fill :
+        entries_to_fill = first_real_entry
         weights = list(enumerate(struct.unpack_from(f"<{entries_to_fill}I", src.read(entries_to_fill*4))))
     else :
         weights = [
