@@ -30,6 +30,7 @@ def read_huffman_table(src: BytesReader, bitCount: int) :
         weights = [
             (int.from_bytes(src.read(index_bytes), 'little'),
              int.from_bytes(src.read(4), 'little'))
+            for _ in range(0, entries_to_fill)
         ]
     table = IntHuffmanTable(map(lambda x: x[0], weights), invert=True)
     for i, w in weights :
