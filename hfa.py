@@ -308,7 +308,7 @@ class _HfaEntry :
         extension_index = self._file_name.rindex('.')
         extension = self._file_name[extension_index+1:]
         self.seek(0)
-        if isinstance(dest, str) and  dest[dest.rfind('.')+1:] == extension :
+        if isinstance(dest, str) and dest[dest.rfind('.')+1:] == extension :
             self.to_file(dest)
         else :
             match extension :
@@ -340,18 +340,21 @@ class _HfaEntry :
         extension_index = self._file_name.rindex('.')
         extension = self._file_name[extension_index+1:]
         self.seek(0)
-        match extension :
-            case 'cbg' :
-                CompressedBG(self).img_read(src)
-            case 'ctd' | 'mp4' | 'chs' | 'ccit' | 'hw' :
-                if isinstance(src, str) :
-                    self.from_file(src)
-                else :
-                    self.data = src
-            case 'mzp' :
-                mzpImg = MzpImage(self.data)
-                mzpImg.img_read(src, **kwargs)
-                self.data = mzpImg.mzp_write()
+        if isinstance(src, str) and src[src.rfind('.')+1:] == extension :
+            self.from_file(src)
+        else :
+            match extension :
+                case 'cbg' :
+                    CompressedBG(self).img_read(src)
+                case 'ctd' | 'mp4' | 'chs' | 'ccit' | 'hw' :
+                    if isinstance(src, str) :
+                        self.from_file(src)
+                    else :
+                        self.data = src
+                case 'mzp' :
+                    mzpImg = MzpImage(self.data)
+                    mzpImg.img_read(src, **kwargs)
+                    self.data = mzpImg.mzp_write()
     
 #endregion #####################################################################
 #region                            HFA ARCHIVE
