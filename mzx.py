@@ -93,9 +93,10 @@ def literal_compress(output: BytesWriter, words: np.ndarray, start: int,
     assert length <= 64
     cmd = (MzxCmd.LITERAL | ((length - 1) << 2))
     output.write(cmd.to_bytes(1))
-    chunk = words[start:start+length]
     if invert :
-        chunk ^= 0xFFFF
+        chunk = words[start:start+length] ^ 0xFFFF
+    else :
+        chunk = words[start:start+length]
     output.write(chunk.tobytes())
 
 @overload
@@ -265,9 +266,11 @@ def mzx_decompress(src: BytesReader | str,
                 k = 2 * (input_file.read(1)[0] + 1)
                 length = 2 * (arg + 1)
                 output_file.seek(pos-k)
-                buffer = output_file.read(length)
                 if k < length :
-                    buffer = (buffer * ceil(length/k))[:length]
+                    buffer = (output_file.read(k) * ceil(length/k))[:length]
+                else :
+                    buffer = output_file.read(length)
+
                 output_file.seek(pos)
                 output_file.write(buffer)
 
