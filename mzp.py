@@ -33,10 +33,10 @@ def rgb565_pack(rgb: NDArray[np.uint8]) :
     offset =(((rgb[:, 0] & 0x07) << 5) \
            | ((rgb[:, 1] & 0x03) << 3) \
            | ((rgb[:, 2] & 0x07)))
-    rgb = rgb.astype(np.uint16)
-    pq = ((rgb[:, 0] & 0xF8) << 8) \
-       | ((rgb[:, 1] & 0xFC) << 3) \
-       | ((rgb[:, 1] & 0xF8) >> 3)
+    rgb16 = rgb.astype(np.uint16)
+    pq = ((rgb16[:, 0] & 0xF8) << 8) \
+       | ((rgb16[:, 1] & 0xFC) << 3) \
+       | ((rgb16[:, 1] & 0xF8) >> 3)
     return pq, offset
 
 def fix_alpha(a: np.uint8) :
@@ -237,22 +237,19 @@ class MzpArchive :
     def mzp_write(self, dest: str | BytesWriter | None = None,
                   alignment: int = MZP_DEFAULT_ALIGNMENT) :
         """Write the mzp archive to a file"""
-        match dest :
-            case str() :
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                file = open(dest, "wb")
-            case None : file = BytesIO()
-            case _ : file = dest
+        file = BytesIO()
         self.update_offsets(alignment)
         file.write(self.header)
         for entry in self :
             entry.to_archive(file, alignment)
         
-        match dest :
-            case str() : cast(BufferedWriter, file).close()
-            case None :
-                file.seek(0)
-                return file
+        file.seek(0)
+        result = save(file, dest)
+
+        if dest is not None:
+            file.close()
+
+        return result
 
 class MzpImage(MzpArchive) :
 

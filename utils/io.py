@@ -34,7 +34,7 @@ def save(src: bytes | BytesReader, dest: str | BytesWriter | None = None) :
         case str() :
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             assert not os.path.isdir(os.path.abspath(dest))
-            file = open(dest, "rb+" if os.path.exists(dest) else "wb+")
+            file = open(dest, "wb+")
             file.write(src)
             file.close()
         case _ :
