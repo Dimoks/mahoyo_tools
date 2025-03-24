@@ -23,10 +23,10 @@ MZP_SECTOR_SIZE = 0x800
 
 def rgb565_unpack(pq: NDArray[np.uint16], offsets_byte: NDArray[np.uint8]) -> NDArray[np.uint8] :
     assert len(pq.shape) == 1 and len(offsets_byte.shape) == 1 
-    r = (((pq & 0xF800) >> 8) + (offsets_byte >> 5)).astype(np.uint8)
-    g = (((pq & 0x07E0) >> 3) + ((offsets_byte >> 3) & 0x03)).astype(np.uint8)
-    b = (((pq & 0x001F) << 3) + (offsets_byte & 0x7)).astype(np.uint8)
-    return np.transpose([r, g, b])
+    r = (((pq & 0xF800) >> 8) | ((offsets_byte >> 5) & 0x07)).astype(np.uint8)
+    g = (((pq & 0x07E0) >> 3) | ((offsets_byte >> 3) & 0x03)).astype(np.uint8)
+    b = (((pq & 0x001F) << 3) | (offsets_byte & 0x07)).astype(np.uint8)
+    return np.stack([r, g, b], axis=1)
 
 def rgb565_pack(rgb: NDArray[np.uint8]) :
     assert len(rgb.shape) == 2 and rgb.shape[1] == 3
@@ -36,7 +36,7 @@ def rgb565_pack(rgb: NDArray[np.uint8]) :
     rgb16 = rgb.astype(np.uint16)
     pq = ((rgb16[:, 0] & 0xF8) << 8) \
        | ((rgb16[:, 1] & 0xFC) << 3) \
-       | ((rgb16[:, 1] & 0xF8) >> 3)
+       | ((rgb16[:, 2] & 0xF8) >> 3)
     return pq, offset
 
 def fix_alpha(a: np.uint8) :
