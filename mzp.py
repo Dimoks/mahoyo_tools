@@ -324,7 +324,8 @@ class MzpImage(MzpArchive) :
 
         return np.vstack((palette, filler), dtype=np.uint8)
     
-    def set_palette(self, palette: np.ndarray | ImagePalette.ImagePalette) :
+    def set_palette(self, palette: np.ndarray | ImagePalette.ImagePalette, 
+                    transparency: np.ndarray | None = None) :
         match (self.bmp_type, self.bmp_depth) :
             case (0x01, 0x00|0x10) : palette_size = 16
             case (0x01, 0x01|0x11|0x91) : palette_size = 256
@@ -340,14 +341,25 @@ class MzpImage(MzpArchive) :
                 case "RGB" :
                     palette_size = palette.size // 3
                     palette.shape = (palette_size, 3)
-                    alpha = np.frombuffer(b'\xFF'*palette_size, dtype=np.uint8)
-                    alpha.shape = (palette_size, 1)
+                    if transparency :
+                        alpha = np.frombuffer(transparency, dtype=np.uint8)
+                        if len(alpha) < palette_size:
+                            alpha = np.concatenate([alpha,
+                                        np.full(palette_size - len(alpha),
+                                        255, dtype=np.uint8)])
+                        alpha.shape = (palette_size, 1)
+                    else:
+                        alpha = np.full((palette_size, 1), 255, dtype=np.uint8)
                     palette = np.hstack((palette, alpha))
                 case "RGBA" :
                     palette.shape = (palette.size // 4, 4)
                 case "L" :
                     palette.shape = (palette.size, 1)
-                    alpha = np.frombuffer(b'\xFF'*palette.size, dtype=np.uint8)
+                    if transparency :
+                        alpha = np.full((palette.size, 1), 0, dtype=np.uint8)
+                        alpha[palette == transparency] = 255
+                    else:
+                        alpha = np.full((palette.size, 1), 255, dtype=np.uint8)
                     palette = np.hstack((palette, palette, palette, alpha))
                 case _ :
                     raise NotImplementedError(f"Unexpected palette mode {mode}")
@@ -517,9 +529,10 @@ class MzpImage(MzpArchive) :
         img_pixels = None
         match (self.bmp_type, self.bits_per_px) :
             case (0x01, 4|8 as bpp) :
-                if img.mode == "P" and img.palette is not None and \
-                     img.palette.mode == "RGBA":
-                    self.set_palette(img.palette)
+                if img.mode == "P" and img.palette is not None :
+                    transparency = img.info.get('transparency')
+                    self.set_palette(img.palette, transparency)
+
                 else :
                     img_pixels = np.array(img.convert("RGBA"))\
                         .reshape((img.height, img.width, 4))
