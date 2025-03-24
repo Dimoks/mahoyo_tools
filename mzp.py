@@ -189,15 +189,19 @@ class MzpArchiveEntry :
 
 class MzpArchive :
 
-    def __init__(self, src: str | bytes) -> None:
-        if isinstance(src, str) :
-            self._file = open(src, "rb+")
+    def __init__(self, src: str | bytes | None = None) -> None :
+        if src is None or (isinstance(src, str) and not os.path.exists(src)) :
+            self._file = BytesIO()
+            nbEntries = 0
         else :
-            self._file = BytesIO(src)
+            if isinstance(src, str) :
+                self._file = open(src, "rb+")
+            else :
+                self._file = BytesIO(src)
             
-        header = self._file.read(MZP_HEADER_SIZE)
-        assert header.startswith(MZP_FILE_MAGIC)
-        nbEntries = int.from_bytes(header[-2:], "little", signed=False)
+            header = self._file.read(MZP_HEADER_SIZE)
+            assert header.startswith(MZP_FILE_MAGIC)
+            nbEntries = int.from_bytes(header[-2:], "little", signed=False)
         
         self._entries: list[MzpArchiveEntry] = [
             MzpArchiveEntry(self, i) for i in range(nbEntries)
@@ -229,6 +233,13 @@ class MzpArchive :
             if alignment > 0 :
                 offset += alignment - offset % alignment
     
+    def add_entry(self, data: bytes) -> MzpArchiveEntry:
+        """Add a new entry to the archive"""
+        entry = MzpArchiveEntry(self, len(self._entries))
+        entry.data = data
+        self._entries.append(entry)
+        return entry
+
     @overload
     def mzp_write(self, dest: BytesWriter | str,
                   alignment: int = MZP_DEFAULT_ALIGNMENT) -> None: ...
