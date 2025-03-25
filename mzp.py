@@ -49,8 +49,6 @@ np_fix_alpha = np.vectorize(fix_alpha)
 def unfix_alpha(a: np.uint8) :
     if a == 0xFF :
         return a
-    elif a == 0 :
-        return np.uint8(0)
     else :
         return np.uint8(a >> 1)
 np_unfix_alpha = np.vectorize(unfix_alpha)
