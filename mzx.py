@@ -48,6 +48,17 @@ class RingBuffer :
             part1 = self._file.read(-read_pos)
             self._file.seek(0)
             return part1 + self._file.read(pos)
+    
+    def word_position(self, word: bytes, word_size: int) :
+        pos = self._file.tell()
+        self._file.seek(0)
+        index = -1
+        while self._file.tell() < self._size :
+            stored = self._file.read(word_size)
+            if stored == word :
+                index = self._file.tell()
+        self._file.seek(pos)
+        return index
 
 def rle_compress_length(words: np.ndarray, cursor: int, clear_count: int,
                         invert_bytes: bool) :
@@ -87,17 +98,6 @@ def backref_compress_length(words: np.ndarray, cursor: int) :
     else :
         return (0, 0)
 
-def ringbuf_index(ring_buf: RingBuffer, word_bytes: bytes) :
-    best_len = 0
-    best_index = 0
-    for i in range(64):
-        rb_bytes = ring_buf.get(i * 2, 2)
-        if rb_bytes == word_bytes:
-            best_len = 1
-            best_index = i
-            break
-    return (best_index, best_len)
-
 def literal_compress(output: BytesWriter, words: np.ndarray, start: int,
                      length: int, invert: bool, ring_buf: RingBuffer) :
 
@@ -134,6 +134,7 @@ def mzx_compress(src: BytesReader, dest: BytesWriter | None = None,
         words = np.append(words, 0x00)
     words = words.view(dtype="<u2")
     end = words.size
+    inversion_xor = 0xFFFF if invert else 0x0000
     if level == 0 :
         cursor = 0
         while cursor < end :
@@ -143,7 +144,7 @@ def mzx_compress(src: BytesReader, dest: BytesWriter | None = None,
 
             cmd: int = (MzxCmd.LITERAL | ((chunk_size - 1) << 2))
             output.write(cmd.to_bytes(1, 'little'))
-            output.write(words[cursor:cursor+chunk_size]^(invert*(0xFFFF)))
+            output.write(words[cursor:cursor+chunk_size] ^ inversion_xor)
             cursor += chunk_size
     else :
     
@@ -169,11 +170,16 @@ def mzx_compress(src: BytesReader, dest: BytesWriter | None = None,
                 else :
                     br_len = 0
                     
-                if best_len == 0 and lit_len == 0 and level >= 2:
-                    word = (words[cursor] ^ (invert*0xFFFF)).tobytes()
-                    rb_index, rb_len = ringbuf_index(ring_buf, word)
-                    if rb_len > best_len:
-                        best_len = rb_len
+                if best_len == 0 and lit_len == 0 and level >= 3:
+                    word = (words[cursor] ^ inversion_xor).tobytes()
+                    rb_index = ring_buf.word_position(word, 2)
+                    if rb_index >= 0 :
+                        best_len = rb_len = 1
+                        rb_index //= 2 # convert index to 2-bytes word
+                    else :
+                        rb_len = 0
+                else :
+                    rb_len = 0
 
             if best_len == 0 :
                 # best is literal
