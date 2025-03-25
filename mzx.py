@@ -48,6 +48,17 @@ class RingBuffer :
             part1 = self._file.read(-read_pos)
             self._file.seek(0)
             return part1 + self._file.read(pos)
+    
+    def word_position(self, word: bytes, word_size: int) :
+        pos = self._file.tell()
+        self._file.seek(0)
+        index = -1
+        while self._file.tell() < self._size :
+            stored = self._file.read(word_size)
+            if stored == word :
+                index = self._file.tell()
+        self._file.seek(pos)
+        return index
 
 def rle_compress_length(words: np.ndarray, cursor: int, clear_count: int,
                         invert_bytes: bool) :
@@ -88,7 +99,7 @@ def backref_compress_length(words: np.ndarray, cursor: int) :
         return (0, 0)
 
 def literal_compress(output: BytesWriter, words: np.ndarray, start: int,
-                     length: int, invert: bool) :
+                     length: int, invert: bool, ring_buf: RingBuffer) :
 
     assert length <= 64
     cmd = (MzxCmd.LITERAL | ((length - 1) << 2))
@@ -98,6 +109,7 @@ def literal_compress(output: BytesWriter, words: np.ndarray, start: int,
     else :
         chunk = words[start:start+length]
     output.write(chunk.tobytes())
+    ring_buf.append(chunk.tobytes())
 
 @overload
 def mzx_compress(src: BytesReader, dest: BytesWriter,
@@ -107,11 +119,13 @@ def mzx_compress(src: BytesReader, dest: None = None,
                  invert: bool = False, level: int = 0) -> BytesIO : ...
 def mzx_compress(src: BytesReader, dest: BytesWriter | None = None,
                  invert: bool = False, level: int = 0) :
+    src = open(src, 'rb') if isinstance(src, str) else src
     start = src.tell()
     end = src.seek(0, 2)
     src.seek(start)
     match dest :
         case None : output = BytesIO()
+        case str() : output = open(dest, "wb+")
         case _ : output = dest
     header = MZX_FILE_MAGIC + (end - start).to_bytes(4, 'little', signed=False)
     output.write(header)
@@ -120,6 +134,7 @@ def mzx_compress(src: BytesReader, dest: BytesWriter | None = None,
         words = np.append(words, 0x00)
     words = words.view(dtype="<u2")
     end = words.size
+    inversion_xor = 0xFFFF if invert else 0x0000
     if level == 0 :
         cursor = 0
         while cursor < end :
@@ -129,17 +144,18 @@ def mzx_compress(src: BytesReader, dest: BytesWriter | None = None,
 
             cmd: int = (MzxCmd.LITERAL | ((chunk_size - 1) << 2))
             output.write(cmd.to_bytes(1, 'little'))
-            output.write(words[cursor:cursor+chunk_size])
+            output.write(words[cursor:cursor+chunk_size] ^ inversion_xor)
             cursor += chunk_size
     else :
     
         clear_count = 0x1000
-        #ring_buf = RingBuffer(128, 0xFF if invert_bytes else 0x00)
+        ring_buf = RingBuffer(128, 0xFF if invert else 0x00)
         lit_start = 0
         lit_len = 0
         best_len = 0
         cursor = 0
         while cursor < end :
+            best_len = 0
             #print(f"{cursor}/{words.size}", end="\r")
             
             if cursor > 0 :
@@ -151,14 +167,20 @@ def mzx_compress(src: BytesReader, dest: BytesWriter | None = None,
                     br_dist, br_len = backref_compress_length(words, cursor)
                     if br_len > best_len :
                         best_len = br_len
-                    # TODO implement ring-buffer
                 else :
                     br_len = 0
+                    
+                if best_len == 0 and lit_len == 0 and level >= 3:
+                    word = (words[cursor] ^ inversion_xor).tobytes()
+                    rb_index = ring_buf.word_position(word, 2)
+                    if rb_index >= 0 :
+                        best_len = rb_len = 1
+                        rb_index //= 2 # convert index to 2-bytes word
+                    else :
+                        rb_len = 0
+                else :
+                    rb_len = 0
 
-                if lit_len > 0 and best_len == 1 : # TODO maybe <= 2 ?
-                    best_len = 0 # changing from literal is not worth it
-            else :
-                best_len = 0
             if best_len == 0 :
                 # best is literal
                 match lit_len :
@@ -166,7 +188,8 @@ def mzx_compress(src: BytesReader, dest: BytesWriter | None = None,
                         lit_start = cursor
                         lit_len = 1
                     case 63 :
-                        literal_compress(output, words, lit_start, 64, invert)
+                        literal_compress(output, words, lit_start, 64, invert,
+                                         ring_buf)
                         if clear_count <= 0:
                             clear_count = 0x1000
                         lit_len = 0
@@ -177,7 +200,7 @@ def mzx_compress(src: BytesReader, dest: BytesWriter | None = None,
             else :
                 if lit_len > 0 :
                     literal_compress(output, words, lit_start,
-                                     lit_len, invert)
+                                     lit_len, invert, ring_buf)
                     if clear_count <= 0:
                         clear_count = 0x1000
                     lit_len = 0
@@ -190,6 +213,10 @@ def mzx_compress(src: BytesReader, dest: BytesWriter | None = None,
                     output.write(cmd.to_bytes(1))
                     output.write(int(br_dist-1).to_bytes(1))
                     clear_count -= br_len
+                elif best_len == rb_len :
+                    cmd = (MzxCmd.RINGBUF | (rb_index << 2))
+                    output.write(cmd.to_bytes(1))
+                    clear_count -= rb_len
                 else :
                     assert False, "Should never reach this point"
                 if clear_count <= 0:
@@ -198,7 +225,7 @@ def mzx_compress(src: BytesReader, dest: BytesWriter | None = None,
         
         if lit_len > 0 :
             literal_compress(output, words, lit_start,
-                             lit_len, invert)
+                             lit_len, invert, ring_buf)
 
     src.seek(start)
     if dest is None :

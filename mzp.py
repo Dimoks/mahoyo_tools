@@ -23,10 +23,10 @@ MZP_SECTOR_SIZE = 0x800
 
 def rgb565_unpack(pq: NDArray[np.uint16], offsets_byte: NDArray[np.uint8]) -> NDArray[np.uint8] :
     assert len(pq.shape) == 1 and len(offsets_byte.shape) == 1 
-    r = (((pq & 0xF800) >> 8) + (offsets_byte >> 5)).astype(np.uint8)
-    g = (((pq & 0x07E0) >> 3) + ((offsets_byte >> 3) & 0x03)).astype(np.uint8)
-    b = (((pq & 0x001F) << 3) + (offsets_byte & 0x7)).astype(np.uint8)
-    return np.transpose([r, g, b])
+    r = (((pq & 0xF800) >> 8) | ((offsets_byte >> 5) & 0x07)).astype(np.uint8)
+    g = (((pq & 0x07E0) >> 3) | ((offsets_byte >> 3) & 0x03)).astype(np.uint8)
+    b = (((pq & 0x001F) << 3) | (offsets_byte & 0x07)).astype(np.uint8)
+    return np.stack([r, g, b], axis=1)
 
 def rgb565_pack(rgb: NDArray[np.uint8]) :
     assert len(rgb.shape) == 2 and rgb.shape[1] == 3
@@ -36,7 +36,7 @@ def rgb565_pack(rgb: NDArray[np.uint8]) :
     rgb16 = rgb.astype(np.uint16)
     pq = ((rgb16[:, 0] & 0xF8) << 8) \
        | ((rgb16[:, 1] & 0xFC) << 3) \
-       | ((rgb16[:, 1] & 0xF8) >> 3)
+       | ((rgb16[:, 2] & 0xF8) >> 3)
     return pq, offset
 
 def fix_alpha(a: np.uint8) :
@@ -187,15 +187,19 @@ class MzpArchiveEntry :
 
 class MzpArchive :
 
-    def __init__(self, src: str | bytes) -> None:
-        if isinstance(src, str) :
-            self._file = open(src, "rb+")
+    def __init__(self, src: str | bytes | None = None) -> None :
+        if src is None or (isinstance(src, str) and not os.path.exists(src)) :
+            self._file = BytesIO()
+            nbEntries = 0
         else :
-            self._file = BytesIO(src)
+            if isinstance(src, str) :
+                self._file = open(src, "rb+")
+            else :
+                self._file = BytesIO(src)
             
-        header = self._file.read(MZP_HEADER_SIZE)
-        assert header.startswith(MZP_FILE_MAGIC)
-        nbEntries = int.from_bytes(header[-2:], "little", signed=False)
+            header = self._file.read(MZP_HEADER_SIZE)
+            assert header.startswith(MZP_FILE_MAGIC)
+            nbEntries = int.from_bytes(header[-2:], "little", signed=False)
         
         self._entries: list[MzpArchiveEntry] = [
             MzpArchiveEntry(self, i) for i in range(nbEntries)
@@ -227,6 +231,13 @@ class MzpArchive :
             if alignment > 0 :
                 offset += alignment - offset % alignment
     
+    def add_entry(self, data: bytes) -> MzpArchiveEntry:
+        """Add a new entry to the archive"""
+        entry = MzpArchiveEntry(self, len(self._entries))
+        entry.data = data
+        self._entries.append(entry)
+        return entry
+
     @overload
     def mzp_write(self, dest: BytesWriter | str,
                   alignment: int = MZP_DEFAULT_ALIGNMENT) -> None: ...
@@ -322,7 +333,8 @@ class MzpImage(MzpArchive) :
 
         return np.vstack((palette, filler), dtype=np.uint8)
     
-    def set_palette(self, palette: np.ndarray | ImagePalette.ImagePalette) :
+    def set_palette(self, palette: np.ndarray | ImagePalette.ImagePalette, 
+                    transparency: np.ndarray | None = None) :
         match (self.bmp_type, self.bmp_depth) :
             case (0x01, 0x00|0x10) : palette_size = 16
             case (0x01, 0x01|0x11|0x91) : palette_size = 256
@@ -338,14 +350,25 @@ class MzpImage(MzpArchive) :
                 case "RGB" :
                     palette_size = palette.size // 3
                     palette.shape = (palette_size, 3)
-                    alpha = np.frombuffer(b'\xFF'*palette_size, dtype=np.uint8)
-                    alpha.shape = (palette_size, 1)
+                    if transparency :
+                        alpha = np.frombuffer(transparency, dtype=np.uint8)
+                        if len(alpha) < palette_size:
+                            alpha = np.concatenate([alpha,
+                                        np.full(palette_size - len(alpha),
+                                        255, dtype=np.uint8)])
+                        alpha.shape = (palette_size, 1)
+                    else:
+                        alpha = np.full((palette_size, 1), 255, dtype=np.uint8)
                     palette = np.hstack((palette, alpha))
                 case "RGBA" :
                     palette.shape = (palette.size // 4, 4)
                 case "L" :
                     palette.shape = (palette.size, 1)
-                    alpha = np.frombuffer(b'\xFF'*palette.size, dtype=np.uint8)
+                    if transparency :
+                        alpha = np.full((palette.size, 1), 0, dtype=np.uint8)
+                        alpha[palette == transparency] = 255
+                    else:
+                        alpha = np.full((palette.size, 1), 255, dtype=np.uint8)
                     palette = np.hstack((palette, palette, palette, alpha))
                 case _ :
                     raise NotImplementedError(f"Unexpected palette mode {mode}")
@@ -515,9 +538,10 @@ class MzpImage(MzpArchive) :
         img_pixels = None
         match (self.bmp_type, self.bits_per_px) :
             case (0x01, 4|8 as bpp) :
-                if img.mode == "P" and img.palette is not None and \
-                     img.palette.mode == "RGBA":
-                    self.set_palette(img.palette)
+                if img.mode == "P" and img.palette is not None :
+                    transparency = img.info.get('transparency')
+                    self.set_palette(img.palette, transparency)
+
                 else :
                     img_pixels = np.array(img.convert("RGBA"))\
                         .reshape((img.height, img.width, 4))
