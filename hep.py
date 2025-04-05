@@ -31,10 +31,7 @@ def fix_alpha(a) :
 np_fix_alpha = np.vectorize(fix_alpha)
 
 def unfix_alpha(a: np.uint8) :
-    if a == 0xFF :
-        return a
-    else :
-        return np.uint8(a >> 1)
+    return np.uint8(a >> 1)
 np_unfix_alpha = np.vectorize(unfix_alpha)
 
 HEP_MAGIC = int.from_bytes(b'HEP\0', 'little')
