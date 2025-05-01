@@ -47,10 +47,7 @@ def fix_alpha(a: np.uint8) :
 np_fix_alpha = np.vectorize(fix_alpha)
 
 def unfix_alpha(a: np.uint8) :
-    if a == 0xFF :
-        return a
-    else :
-        return np.uint8(a >> 1)
+    return np.uint8(a >> 1)
 np_unfix_alpha = np.vectorize(unfix_alpha)
 
 class MzpArchiveEntry :
@@ -267,6 +264,7 @@ class MzpImage(MzpArchive) :
     def __init__(self, src: str | bytes) -> None:
         super().__init__(src)
         self.update_img_info()
+        self.palette = None
     
     def update_img_info(self) :
         (self.width, self.height, self.tile_width, self.tile_height,
@@ -306,6 +304,44 @@ class MzpImage(MzpArchive) :
             return 1
         else :
             return floor(bpp / 8)
+
+    def check_alpha_transparency(self, alpha):
+        min_alpha = np.min(alpha)
+        max_alpha = np.max(alpha)
+
+        if min_alpha == 0 and max_alpha == 0:
+            return 0x00
+        if max_alpha < 255:
+            return 0x01
+        if min_alpha == 255:
+            return 0x02
+        return 0x01
+
+    def get_tile_transparency(self, pixels: np.ndarray):
+        local_palette = self.palette
+        is_palette_available = local_palette is not None and len(local_palette) > 0
+
+        # Handle 1D or single-channel cases
+        if pixels.ndim == 1 or (pixels.ndim > 1 and pixels.shape[-1] == 1):
+            indices = pixels.flatten()
+            if not is_palette_available:
+                return 0x02
+
+            alpha = local_palette[indices, 3] if local_palette.shape[1] >= 4 else \
+                    np.full_like(indices, 255, dtype=np.uint8)
+            return self.check_alpha_transparency(alpha)
+
+        # Handle multi-channel cases
+        if pixels.ndim == 2 and pixels.shape[1] == 4:  # RGBA
+            return self.check_alpha_transparency(pixels[:, 3])
+        elif pixels.ndim == 3 and pixels.shape[2] == 4:  # RGBA 2D image
+            return self.check_alpha_transparency(pixels[:, :, 3].flatten())
+
+        # RGB, Grayscale or other cases without alpha
+        if pixels.ndim in (2, 3) and pixels.shape[-1] in (1, 2, 3):
+            return 0x02
+
+        raise ValueError(f"Unexpected pixel array shape: {pixels.shape}")
 
     def get_palette(self) :
         match (self.bmp_type, self.bmp_depth) :
@@ -378,6 +414,7 @@ class MzpImage(MzpArchive) :
                 case (n, 3) : palette = np.hstack((palette, np.full((n, 1), 0xFF, dtype=np.uint8)))
                 case (n,) : palette = palette.reshape((n//4, 4))
         assert palette.shape[0] == palette_size
+        self.palette = palette
         palette = np.hstack((palette[:, :3], np_unfix_alpha(palette[:, 3:])), dtype=np.uint8)
 
         if self.bmp_depth in [0x11, 0x91] :
@@ -386,7 +423,7 @@ class MzpImage(MzpArchive) :
                 block1 = palette[i+8:i+16].copy()
                 palette[i+8:i+16] = palette[i+16:i+24]
                 palette[i+16:i+24] = block1
-        self[0].data = self[0].data[0:16] + palette.tobytes()
+        self[0].data += palette.tobytes()
 
     def get_tile(self, index: int) -> np.ndarray :
         tile_file = mzx_decompress(self[index+1].to_file())
@@ -536,6 +573,7 @@ class MzpImage(MzpArchive) :
 
         assert img.width == width and img.height == height
         img_pixels = None
+        self[0].data = self[0].data[0:16]
         match (self.bmp_type, self.bits_per_px) :
             case (0x01, 4|8 as bpp) :
                 if img.mode == "P" and img.palette is not None :
@@ -566,9 +604,14 @@ class MzpImage(MzpArchive) :
                 start_col = x * (self.tile_width - crop * 2)
                 col_count = min(self.width - start_col, self.tile_width) - crop * 2
                 end_col = start_col + col_count
+
+                tile_pixels_inner = img_pixels[start_row:end_row, start_col:end_col]
+                tile_transparency = self.get_tile_transparency(tile_pixels_inner)
+                self[0].data += tile_transparency.to_bytes()
+
                 tile_pixels = np.hstack((
                     np.zeros((row_count, crop, nb_channels), dtype = np.uint8),
-                    img_pixels[start_row:end_row, start_col:end_col],
+                    tile_pixels_inner,
                     np.zeros((row_count, self.tile_width - col_count - crop, nb_channels), dtype=np.uint8)
                 ))
                 tile_pixels = np.vstack((
@@ -586,9 +629,9 @@ def write_pngchunk_withcrc(file: BytesWriter, data_type: bytes, data: bytes):
     file.write(struct.pack(">I", zlib.crc32(data_type + data, 0) & 0xffffffff))     
         
 """
-HEP (bmp_type = 0x0C) header palette :
-1 byte per tile, 0x00 / 0x01 / 0x02 (?)
-
+At the end of the image header (after the palette, if any),
+the transparency of the tiles is written, 1 byte per tile:
+0x00 - fully transparent tile, 0x01 - with transparency, 0x02 - opaque.
 """
 # TODO : - test img extraction with new implementation (numpy)
 #        - implement img injection

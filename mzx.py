@@ -15,10 +15,14 @@ class MzxCmd :
     LITERAL = 3
 
 class RingBuffer :
-    def __init__(self, size: int, baseValue: int) -> None:
-        self._file = BytesIO(bytes([baseValue]) * size)
+    def __init__(self, size: int, baseValue: int = None) -> None:
         self._size = size
     
+        if baseValue is not None:
+            self._file = BytesIO(bytes([baseValue]) * size)
+        else:
+            self._file = BytesIO()
+
     def append(self, buffer: bytes) -> None :
         pos = self._file.tell()
         
@@ -31,6 +35,9 @@ class RingBuffer :
             self._file.write(buffer[split_index:])
     
     def get(self, index: int, size: int) -> bytes :
+        if self._file.tell() == 0:
+            return b''
+
         pos = self._file.tell()
         self._file.seek(index)
         result = self._file.read(size)
@@ -55,8 +62,11 @@ class RingBuffer :
         index = -1
         while self._file.tell() < self._size :
             stored = self._file.read(word_size)
+            if not stored:
+                break
             if stored == word :
-                index = self._file.tell()
+                index = self._file.tell() - word_size
+                break
         self._file.seek(pos)
         return index
 
@@ -70,6 +80,7 @@ def rle_compress_length(words: np.ndarray, cursor: int, clear_count: int,
         last = words[cursor-1]
     if word == last :
         max_chunk_size = min(64, words.size - cursor)
+        max_chunk_size = min(max_chunk_size, clear_count)
         length = 1
         while length < max_chunk_size and words[cursor+length] == last :
             length += 1
@@ -77,19 +88,24 @@ def rle_compress_length(words: np.ndarray, cursor: int, clear_count: int,
     else :
         return 0
 
-def backref_compress_length(words: np.ndarray, cursor: int) :
-    start = max(cursor - 256, 0)
-    occurrences = np.where(words[start:cursor] == words[cursor])
+def backref_compress_length(words: np.ndarray, cursor: int, clear_count: int) :
+    start = max(cursor - 255, 0)
+    occurrences = np.where(words[start:cursor] == words[cursor])[0]
+    max_length = min(64, clear_count)
+    max_dist = 0x1000 - clear_count
     best_index = -1
     best_len = 0
-    for o in occurrences[0] :
+    for o in occurrences :
+        distance = cursor - (start + o)
+        if distance > max_dist or distance < 0 :
+            continue
         length = 1
-        back_ref = words[start:start+64] # no need to stop at cursor
-        while o+length < back_ref.size and \
-                cursor + length < words.size and \
-                back_ref[o+length] == words[cursor+length] :
+        while (length < max_length and
+               cursor + length < words.size and
+               words[start + o + length] == words[cursor + length]) :
             length += 1
-        if length > best_len :
+        if (length > best_len or (length == best_len and
+                distance < (cursor - (start + best_index)))) :
             best_index = o
             best_len = length
     if best_len > 0 :
@@ -99,7 +115,7 @@ def backref_compress_length(words: np.ndarray, cursor: int) :
         return (0, 0)
 
 def literal_compress(output: BytesWriter, words: np.ndarray, start: int,
-                     length: int, invert: bool, ring_buf: RingBuffer) :
+                     length: int, invert: bool) :
 
     assert length <= 64
     cmd = (MzxCmd.LITERAL | ((length - 1) << 2))
@@ -109,7 +125,6 @@ def literal_compress(output: BytesWriter, words: np.ndarray, start: int,
     else :
         chunk = words[start:start+length]
     output.write(chunk.tobytes())
-    ring_buf.append(chunk.tobytes())
 
 @overload
 def mzx_compress(src: BytesReader, dest: BytesWriter,
@@ -149,71 +164,79 @@ def mzx_compress(src: BytesReader, dest: BytesWriter | None = None,
     else :
     
         clear_count = 0x1000
-        ring_buf = RingBuffer(128, 0xFF if invert else 0x00)
+        ring_buf = RingBuffer(128)
         lit_start = 0
         lit_len = 0
         best_len = 0
+        best_type = 0 # 0: LITERAL, 1: RLE, 2: BACKREF, 3: RINGBUF
         cursor = 0
         while cursor < end :
             best_len = 0
+            best_type = 0 # LITERAL
+            current_word = (words[cursor] ^ inversion_xor).tobytes()
+            rle_len = rle_compress_length(words, cursor, clear_count, invert)
+            if rle_len > 0 :
+                best_len = rle_len
+                best_type = 1 # RLE
             #print(f"{cursor}/{words.size}", end="\r")
             
             if cursor > 0 :
-                rle_len = rle_compress_length(words, cursor, clear_count, invert)
-                best_len = rle_len
-
                 if best_len < 64 and level >= 2:
                     # back-ref
-                    br_dist, br_len = backref_compress_length(words, cursor)
-                    if br_len > best_len :
+                    br_dist, br_len = backref_compress_length(words, cursor, 
+                                                                clear_count)
+                    if br_len > best_len + 1 and not (best_len > 0 and
+                            best_len * 2 + 1 >= br_len and
+                            0x1000 - clear_count + best_len >= br_dist) :
                         best_len = br_len
-                else :
-                    br_len = 0
-                    
-                if best_len == 0 and lit_len == 0 and level >= 3:
-                    word = (words[cursor] ^ inversion_xor).tobytes()
-                    rb_index = ring_buf.word_position(word, 2)
+                        best_type = 2 # BACKREF
+
+                if best_len == 0 and level >= 2:
+                    rb_index = ring_buf.word_position(current_word, 2)
                     if rb_index >= 0 :
                         best_len = rb_len = 1
+                        best_type = 3 # RINGBUF
                         rb_index //= 2 # convert index to 2-bytes word
-                    else :
-                        rb_len = 0
-                else :
-                    rb_len = 0
 
-            if best_len == 0 :
+            if best_type == 0 :
                 # best is literal
                 match lit_len :
                     case 0 :
                         lit_start = cursor
                         lit_len = 1
                     case 63 :
-                        literal_compress(output, words, lit_start, 64, invert,
-                                         ring_buf)
+                        literal_compress(output, words, lit_start, 64, invert)
                         if clear_count <= 0:
                             clear_count = 0x1000
                         lit_len = 0
                     case _ :
                         lit_len += 1
+                if level >= 2 :
+                    ring_buf.append(current_word)
                 cursor += 1
                 clear_count -= 1
+                if clear_count <= 0 and lit_len > 0 :
+                    clear_count = 0x1000
+                    literal_compress(output, words, lit_start,
+                                     lit_len, invert)
+                    lit_len = 0
             else :
                 if lit_len > 0 :
                     literal_compress(output, words, lit_start,
-                                     lit_len, invert, ring_buf)
+                                     lit_len, invert)
                     if clear_count <= 0:
                         clear_count = 0x1000
                     lit_len = 0
-                if best_len == rle_len :
+                if best_type == 1 : # RLE
                     cmd = (MzxCmd.RLE | ((rle_len - 1) << 2))
                     output.write(cmd.to_bytes(1))
                     clear_count -= rle_len
-                elif best_len == br_len :
+                elif best_type == 2 : # BACKREF
                     cmd = (MzxCmd.BACKREF | (br_len - 1) << 2)
                     output.write(cmd.to_bytes(1))
                     output.write(int(br_dist-1).to_bytes(1))
                     clear_count -= br_len
-                elif best_len == rb_len :
+                elif best_type == 3 : # RINGBUF
                     cmd = (MzxCmd.RINGBUF | (rb_index << 2))
                     output.write(cmd.to_bytes(1))
                     clear_count -= rb_len
@@ -225,7 +248,7 @@ def mzx_compress(src: BytesReader, dest: BytesWriter | None = None,
         
         if lit_len > 0 :
             literal_compress(output, words, lit_start,
-                             lit_len, invert, ring_buf)
+                             lit_len, invert)
 
     src.seek(start)
     if dest is None :
