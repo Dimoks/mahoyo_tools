@@ -45,7 +45,7 @@ def lenzu_crc(src: 'SupportsRead[bytes]', size: int,
     lut = [0x0e9, 0x115, 0x137, 0x1b1]
     crc = seed
     for i in range(0, size) :
-        crc = ((crc + src.read(1)[0]) * lut[(lutOffset + i) & 3]) % (1 << 32)
+        crc = ((crc + src.read(1)[0]) * lut[(lutOffset + i) & 3]) % (1 << 64)
     return crc
 
 @overload
@@ -62,8 +62,8 @@ def lenzu_decompress(src: BytesReader, compressed_size: int,
     # header
     magic = src.read(len(LENZU_MAGIC))
     assert magic == LENZU_MAGIC
-    decomp_len, crc, _ = struct.unpack_from("<IQI", src.read(16))
-
+    decomp_len, crcH, crcL, _ = struct.unpack_from("<IIII", src.read(16))
+    crc = (crcH << 32) | crcL
     # decompressor options
     _, huffBcRaw, huffBcMin, brLowBcXUpper, brLowBc, brBaseDist \
          = struct.unpack_from('6B', src.read(6))
