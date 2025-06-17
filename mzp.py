@@ -9,7 +9,7 @@ from PIL import Image, ImagePalette
 import numpy as np
 from numpy.typing import NDArray
 
-from .mzx import mzx_compress, mzx_decompress
+from .mzx import mzx_compress, mzx_decompress, MZX_FILE_MAGIC
 from .hep import hep_extract_tile, hep_insert_tile
 from .utils.io import BytesReader, BytesWriter, save
 from .utils.quantize import quantize
@@ -342,6 +342,55 @@ class MzpImage(MzpArchive) :
             return 0x02
 
         raise ValueError(f"Unexpected pixel array shape: {pixels.shape}")
+    def get_filler_index(self) -> int:
+        """
+        Extract the filler index from the last tile in the MZP archive if
+        bmp_type is 0x01.
+
+        Returns:
+            int: The filler index, or 0 if invalid or not applicable.
+
+        Raises:
+            ValueError: If the last tile data is invalid or decompression fails.
+        """
+        if self.bmp_type != 0x01 :
+            return 0
+
+        if not self._entries :
+            raise ValueError("MZP archive is empty, cannot extract filler")
+
+        last_entry = self._entries[-1]
+        last_tile_compressed = last_entry.data
+
+        # Check if data is large enough to contain MZX header
+        if len(last_tile_compressed) < len(MZX_FILE_MAGIC) + 4 :
+            raise ValueError("Last tile data too small to contain MZX header")
+
+        # Validate MZX header magic
+        header = last_tile_compressed[:len(MZX_FILE_MAGIC) + 4]
+        if header[:len(MZX_FILE_MAGIC)] != MZX_FILE_MAGIC :
+            raise ValueError("Invalid file magic in last tile")
+
+        # Get decompressed size from header
+        decompressed_size = int.from_bytes(header[-4:], 'little', signed=False)
+
+        # Decompress the tile
+        decompressed_tile = mzx_decompress(BytesIO(last_tile_compressed))
+        decompressed_data = decompressed_tile.read()
+        if len(decompressed_data) != decompressed_size :
+            raise ValueError("Decompressed tile size mismatch: expected "
+                             f"{decompressed_size}, got {len(decompressed_data)}")
+        if not decompressed_data :
+            raise ValueError("Decompressed tile is empty")
+        filler = decompressed_data[-1]
+
+        # Validate filler index against palette size
+        if self.palette is None or filler >= len(self.palette) :
+            raise ValueError(f"Invalid filler index from last tile: {filler} "
+                              "palette size: " + (len(self.palette)
+                              if self.palette is not None else 0))
+
+        return filler
 
     def get_palette(self) :
         match (self.bmp_type, self.bmp_depth) :
@@ -388,12 +437,12 @@ class MzpImage(MzpArchive) :
                     palette.shape = (palette_size, 3)
                     if transparency :
                         alpha = np.frombuffer(transparency, dtype=np.uint8)
-                        if len(alpha) < palette_size:
+                        if len(alpha) < palette_size :
                             alpha = np.concatenate([alpha,
                                         np.full(palette_size - len(alpha),
                                         255, dtype=np.uint8)])
                         alpha.shape = (palette_size, 1)
-                    else:
+                    else :
                         alpha = np.full((palette_size, 1), 255, dtype=np.uint8)
                     palette = np.hstack((palette, alpha))
                 case "RGBA" :
@@ -403,7 +452,7 @@ class MzpImage(MzpArchive) :
                     if transparency :
                         alpha = np.full((palette.size, 1), 0, dtype=np.uint8)
                         alpha[palette == transparency] = 255
-                    else:
+                    else :
                         alpha = np.full((palette.size, 1), 255, dtype=np.uint8)
                     palette = np.hstack((palette, palette, palette, alpha))
                 case _ :
@@ -574,11 +623,13 @@ class MzpImage(MzpArchive) :
         assert img.width == width and img.height == height
         img_pixels = None
         self[0].data = self[0].data[0:16]
+        filler_color = 0
         match (self.bmp_type, self.bits_per_px) :
             case (0x01, 4|8 as bpp) :
                 if img.mode == "P" and img.palette is not None :
                     transparency = img.info.get('transparency')
                     self.set_palette(img.palette, transparency)
+                    filler_color = self.get_filler_index()
 
                 else :
                     img_pixels = np.array(img.convert("RGBA"))\
