@@ -547,22 +547,34 @@ class MzpImage(MzpArchive) :
 
     def img_write(self, dest: str | BytesWriter | None = None) :
         crop = self.tile_crop
-        height = self.height - self.tile_y_count * crop * 2
-        width = self.width - self.tile_x_count * crop * 2
+        height = self.height - (self.tile_y_count - 1)  * crop * 2 + (1
+                    if self.bmp_type == 0x01 else 0)
+        width = self.width - (self.tile_x_count - 1) * crop * 2 + (1
+                    if self.bmp_type == 0x01 else 0)
         
         img_pixels = np.zeros((height, width, self.nb_channels), dtype=np.uint8)
         for y in range(self.tile_y_count) :
             start_row = y * (self.tile_height - crop * 2)
-            row_count =  min(self.height - start_row, self.tile_height) - crop * 2
-            end_row = start_row + row_count
+            start_y = crop if (crop and y > 0) else 0
+            end_y = (self.tile_height - crop) if (crop and
+                     y < self.tile_y_count - 1) else self.tile_height
+            row_count = min(height - start_row - start_y, end_y - start_y)
+
             for x in range(self.tile_x_count) :
                 index = self.tile_x_count * y + x
                 tile_pixels = self.get_tile(index)
                 start_col = x * (self.tile_width - crop * 2)
-                col_count = min(self.width - start_col, self.tile_width) - crop * 2
-                end_col = start_col + col_count
-                img_pixels[start_row:end_row, start_col:end_col] = \
-                    tile_pixels[crop:crop+row_count, crop:crop+col_count]
+                start_x = crop if (crop and x > 0) else 0
+                end_x = (self.tile_width - crop) if (crop and
+                        x < self.tile_x_count - 1) else self.tile_width
+                col_count = min(width - start_col - start_x, end_x - start_x)
+
+                img_pixels[start_row + start_y:
+                           start_row + start_y + row_count,
+                           start_col + start_x:
+                           start_col + start_x + col_count] = \
+                    tile_pixels[start_y:start_y + row_count,
+                                start_x:start_x + col_count]
         
         match dest :
             case str() :
